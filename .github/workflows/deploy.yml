@@ -1,0 +1,401 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cadai_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          cd backend && npm ci
+          cd ../frontend && npm ci
+          cd ../ai-service && pip install -r requirements.txt
+
+      - name: Run linting
+        run: |
+          cd backend && npm run lint
+          cd ../frontend && npm run lint
+          cd ../ai-service && flake8 src/
+
+      - name: Run type checking
+        run: |
+          cd backend && npm run type-check
+          cd ../frontend && npm run type-check
+          cd ../ai-service && mypy src/
+
+      - name: Run tests
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/cadai_test
+          REDIS_URL: redis://localhost:6379
+          NODE_ENV: test
+        run: |
+          cd backend && npm run test:ci
+          cd ../frontend && npm run test:ci
+          cd ../ai-service && python -m pytest tests/ --cov=src/
+
+      - name: Run security audit
+        run: |
+          cd backend && npm audit --audit-level high
+          cd ../frontend && npm audit --audit-level high
+          cd ../ai-service && safety check
+
+      - name: Upload test coverage
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./backend/coverage/lcov.info,./frontend/coverage/lcov.info,./ai-service/coverage.xml
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push backend image
+        id: build-backend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          target: production
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/backend:${{ github.sha }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push frontend image
+        id: build-frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          target: production
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/frontend:${{ github.sha }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push AI service image
+        id: build-ai
+        uses: docker/build-push-action@v5
+        with:
+          context: ./ai-service
+          file: ./ai-service/Dockerfile
+          target: production
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/ai-service:${{ github.sha }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  security-scan:
+    needs: build
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/backend:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  deploy-staging:
+    if: github.ref == 'refs/heads/main' || github.event.inputs.environment == 'staging'
+    needs: [test, build, security-scan]
+    runs-on: ubuntu-latest
+    environment: staging
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ secrets.STAGING_SSH_KEY }}
+
+      - name: Deploy to staging
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST }} << 'EOF'
+            cd /opt/cad-ai-platform
+            
+            # Pull latest code
+            git pull origin main
+            
+            # Update environment variables
+            echo "IMAGE_TAG=${{ github.sha }}" > .env.staging
+            cat .env.staging.template >> .env.staging
+            
+            # Deploy with new images
+            docker-compose -f docker-compose.staging.yml pull
+            docker-compose -f docker-compose.staging.yml up -d
+            
+            # Wait for services to be ready
+            sleep 30
+            
+            # Run health checks
+            ./scripts/health-check.sh
+            
+            # Run database migrations
+            docker-compose -f docker-compose.staging.yml exec -T backend npm run migrate
+          EOF
+
+      - name: Run smoke tests
+        run: |
+          # Wait for deployment to stabilize
+          sleep 60
+          
+          # Run basic smoke tests
+          curl -f https://staging.cadai-platform.com/health
+          curl -f https://staging.cadai-platform.com/api/health
+
+  deploy-production:
+    if: github.ref == 'refs/heads/main' && github.event.inputs.environment != 'staging'
+    needs: [deploy-staging]
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ secrets.PRODUCTION_SSH_KEY }}
+
+      - name: Create deployment backup
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.PRODUCTION_USER }}@${{ secrets.PRODUCTION_HOST }} << 'EOF'
+            cd /opt/cad-ai-platform
+            
+            # Create backup before deployment
+            ./scripts/backup/backup-database.sh
+            ./scripts/backup/backup-files.sh
+            
+            # Tag current deployment
+            docker tag $(docker images --format "table {{.Repository}}:{{.Tag}}" | grep backend | head -1) backup-$(date +%Y%m%d-%H%M%S)
+          EOF
+
+      - name: Deploy to production
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.PRODUCTION_USER }}@${{ secrets.PRODUCTION_HOST }} << 'EOF'
+            cd /opt/cad-ai-platform
+            
+            # Pull latest code
+            git pull origin main
+            
+            # Update environment variables
+            echo "IMAGE_TAG=${{ github.sha }}" > .env.production
+            cat .env.production.template >> .env.production
+            
+            # Rolling deployment
+            docker-compose -f docker-compose.prod.yml pull
+            
+            # Update services one by one
+            docker-compose -f docker-compose.prod.yml up -d --no-deps backend
+            sleep 30
+            ./scripts/health-check.sh
+            
+            docker-compose -f docker-compose.prod.yml up -d --no-deps frontend
+            sleep 30
+            ./scripts/health-check.sh
+            
+            docker-compose -f docker-compose.prod.yml up -d --no-deps ai-service
+            sleep 30
+            ./scripts/health-check.sh
+            
+            # Run database migrations
+            docker-compose -f docker-compose.prod.yml exec -T backend npm run migrate
+            
+            # Final health check
+            ./scripts/health-check.sh
+          EOF
+
+      - name: Run production smoke tests
+        run: |
+          # Wait for deployment to stabilize
+          sleep 120
+          
+          # Run comprehensive smoke tests
+          curl -f https://cadai-platform.com/health
+          curl -f https://cadai-platform.com/api/health
+          
+          # Test critical endpoints
+          curl -f -X POST https://cadai-platform.com/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"email":"test@example.com","password":"invalid"}' \
+            | grep -q "error"
+
+      - name: Notify deployment success
+        if: success()
+        run: |
+          curl -X POST ${{ secrets.SLACK_WEBHOOK_URL }} \
+            -H "Content-Type: application/json" \
+            -d '{
+              "text": "🚀 Production deployment successful!",
+              "attachments": [{
+                "color": "good",
+                "fields": [
+                  {"title": "Version", "value": "${{ github.sha }}", "short": true},
+                  {"title": "Environment", "value": "Production", "short": true},
+                  {"title": "Deployed by", "value": "${{ github.actor }}", "short": true}
+                ]
+              }]
+            }'
+
+      - name: Notify deployment failure
+        if: failure()
+        run: |
+          curl -X POST ${{ secrets.SLACK_WEBHOOK_URL }} \
+            -H "Content-Type: application/json" \
+            -d '{
+              "text": "❌ Production deployment failed!",
+              "attachments": [{
+                "color": "danger",
+                "fields": [
+                  {"title": "Version", "value": "${{ github.sha }}", "short": true},
+                  {"title": "Environment", "value": "Production", "short": true},
+                  {"title": "Failed step", "value": "${{ github.job }}", "short": true}
+                ]
+              }]
+            }'
+
+  rollback:
+    if: failure() && needs.deploy-production.result == 'failure'
+    needs: [deploy-production]
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+      - name: Rollback production deployment
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.PRODUCTION_USER }}@${{ secrets.PRODUCTION_HOST }} << 'EOF'
+            cd /opt/cad-ai-platform
+            
+            # Find previous backup image
+            BACKUP_IMAGE=$(docker images --format "table {{.Repository}}:{{.Tag}}" | grep backup- | head -1)
+            
+            if [ -n "$BACKUP_IMAGE" ]; then
+              echo "Rolling back to: $BACKUP_IMAGE"
+              
+              # Tag backup as current
+              docker tag $BACKUP_IMAGE current-backend
+              
+              # Restart with previous version
+              docker-compose -f docker-compose.prod.yml up -d
+              
+              # Wait and verify
+              sleep 60
+              ./scripts/health-check.sh
+              
+              echo "Rollback completed successfully"
+            else
+              echo "No backup image found for rollback"
+              exit 1
+            fi
+          EOF
+
+      - name: Notify rollback
+        run: |
+          curl -X POST ${{ secrets.SLACK_WEBHOOK_URL }} \
+            -H "Content-Type: application/json" \
+            -d '{
+              "text": "🔄 Production rollback completed",
+              "attachments": [{
+                "color": "warning",
+                "fields": [
+                  {"title": "Reason", "value": "Deployment failure", "short": true},
+                  {"title": "Environment", "value": "Production", "short": true}
+                ]
+              }]
+            }'

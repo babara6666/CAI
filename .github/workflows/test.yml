@@ -1,0 +1,521 @@
+name: Comprehensive Test Suite
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  NODE_VERSION: '18'
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  backend-unit-tests:
+    name: Backend Unit Tests
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cad_ai_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Run database migrations
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/cad_ai_test
+          REDIS_URL: redis://localhost:6379
+          NODE_ENV: test
+        run: npm run db:migrate
+
+      - name: Run unit tests
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/cad_ai_test
+          REDIS_URL: redis://localhost:6379
+          NODE_ENV: test
+          JWT_SECRET: test-jwt-secret-for-ci
+          ENCRYPTION_KEY: test-encryption-key-32-characters
+        run: npm run test:unit
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        with:
+          file: backend/coverage/lcov.info
+          flags: backend-unit
+          name: backend-unit-tests
+
+  backend-integration-tests:
+    name: Backend Integration Tests
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cad_ai_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Run database migrations
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/cad_ai_test
+          REDIS_URL: redis://localhost:6379
+          NODE_ENV: test
+        run: npm run db:migrate
+
+      - name: Run integration tests
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/cad_ai_test
+          REDIS_URL: redis://localhost:6379
+          NODE_ENV: test
+          JWT_SECRET: test-jwt-secret-for-ci
+          ENCRYPTION_KEY: test-encryption-key-32-characters
+        run: npm run test:integration
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        with:
+          file: backend/coverage/lcov.info
+          flags: backend-integration
+          name: backend-integration-tests
+
+  backend-security-tests:
+    name: Backend Security Tests
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cad_ai_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Run security tests
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/cad_ai_test
+          NODE_ENV: test
+          JWT_SECRET: test-jwt-secret-for-ci
+          ENCRYPTION_KEY: test-encryption-key-32-characters
+        run: npm run test:security
+
+      - name: Run security audit
+        working-directory: backend
+        run: npm audit --audit-level=high
+
+  ai-service-tests:
+    name: AI Service Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install AI service dependencies
+        working-directory: ai-service
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run AI service tests
+        working-directory: ai-service
+        run: pytest --cov=src --cov-report=xml --cov-report=html
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        with:
+          file: ai-service/coverage.xml
+          flags: ai-service
+          name: ai-service-tests
+
+  frontend-unit-tests:
+    name: Frontend Unit Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run unit tests
+        working-directory: frontend
+        run: npm run test:unit
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        with:
+          file: frontend/coverage/lcov.info
+          flags: frontend-unit
+          name: frontend-unit-tests
+
+  frontend-accessibility-tests:
+    name: Frontend Accessibility Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run accessibility tests
+        working-directory: frontend
+        run: npm run test:a11y
+
+  performance-tests:
+    name: Performance Tests
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cad_ai_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Run database migrations
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/cad_ai_test
+          REDIS_URL: redis://localhost:6379
+          NODE_ENV: test
+        run: npm run db:migrate
+
+      - name: Run performance tests
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/cad_ai_test
+          REDIS_URL: redis://localhost:6379
+          NODE_ENV: test
+          JWT_SECRET: test-jwt-secret-for-ci
+          ENCRYPTION_KEY: test-encryption-key-32-characters
+        run: npm run test:performance
+
+      - name: Upload performance results
+        uses: actions/upload-artifact@v3
+        with:
+          name: performance-results
+          path: backend/performance-results/
+
+  e2e-tests:
+    name: End-to-End Tests
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cad_ai_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: |
+          cd backend && npm ci
+          cd ../frontend && npm ci
+
+      - name: Install Playwright browsers
+        working-directory: frontend
+        run: npx playwright install --with-deps
+
+      - name: Start backend server
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/cad_ai_test
+          REDIS_URL: redis://localhost:6379
+          NODE_ENV: test
+          JWT_SECRET: test-jwt-secret-for-ci
+          ENCRYPTION_KEY: test-encryption-key-32-characters
+        run: |
+          npm run db:migrate
+          npm run dev &
+          sleep 10
+
+      - name: Start frontend server
+        working-directory: frontend
+        run: |
+          npm run dev &
+          sleep 10
+
+      - name: Run E2E tests
+        working-directory: frontend
+        run: npm run test:e2e
+
+      - name: Upload E2E test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: e2e-results
+          path: |
+            frontend/test-results/
+            frontend/playwright-report/
+
+  code-quality:
+    name: Code Quality Checks
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: |
+          cd backend && npm ci
+          cd ../frontend && npm ci
+
+      - name: Run backend linting
+        working-directory: backend
+        run: npm run lint
+
+      - name: Run frontend linting
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Run TypeScript checks
+        run: |
+          cd backend && npx tsc --noEmit
+          cd ../frontend && npx tsc --noEmit
+
+      - name: Setup Python for AI service
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install AI service dependencies
+        working-directory: ai-service
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run Python linting
+        working-directory: ai-service
+        run: |
+          flake8 src tests
+          black --check src tests
+          isort --check-only src tests
+
+      - name: Run Python type checking
+        working-directory: ai-service
+        run: mypy src
+
+  test-summary:
+    name: Test Summary
+    runs-on: ubuntu-latest
+    needs: [
+      backend-unit-tests,
+      backend-integration-tests,
+      backend-security-tests,
+      ai-service-tests,
+      frontend-unit-tests,
+      frontend-accessibility-tests,
+      performance-tests,
+      e2e-tests,
+      code-quality
+    ]
+    if: always()
+    
+    steps:
+      - name: Check test results
+        run: |
+          echo "Backend Unit Tests: ${{ needs.backend-unit-tests.result }}"
+          echo "Backend Integration Tests: ${{ needs.backend-integration-tests.result }}"
+          echo "Backend Security Tests: ${{ needs.backend-security-tests.result }}"
+          echo "AI Service Tests: ${{ needs.ai-service-tests.result }}"
+          echo "Frontend Unit Tests: ${{ needs.frontend-unit-tests.result }}"
+          echo "Frontend Accessibility Tests: ${{ needs.frontend-accessibility-tests.result }}"
+          echo "Performance Tests: ${{ needs.performance-tests.result }}"
+          echo "E2E Tests: ${{ needs.e2e-tests.result }}"
+          echo "Code Quality: ${{ needs.code-quality.result }}"
+          
+          if [[ "${{ needs.backend-unit-tests.result }}" != "success" ]] || \
+             [[ "${{ needs.backend-integration-tests.result }}" != "success" ]] || \
+             [[ "${{ needs.backend-security-tests.result }}" != "success" ]] || \
+             [[ "${{ needs.ai-service-tests.result }}" != "success" ]] || \
+             [[ "${{ needs.frontend-unit-tests.result }}" != "success" ]] || \
+             [[ "${{ needs.frontend-accessibility-tests.result }}" != "success" ]] || \
+             [[ "${{ needs.performance-tests.result }}" != "success" ]] || \
+             [[ "${{ needs.e2e-tests.result }}" != "success" ]] || \
+             [[ "${{ needs.code-quality.result }}" != "success" ]]; then
+            echo "❌ Some tests failed"
+            exit 1
+          else
+            echo "✅ All tests passed"
+          fi

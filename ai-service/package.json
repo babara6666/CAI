@@ -1,0 +1,16 @@
+{
+  "name": "cad-ai-service",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "python -m uvicorn main:app --reload --host 0.0.0.0 --port 8002",
+    "start": "python -m uvicorn main:app --host 0.0.0.0 --port 8002",
+    "test": "python -m pytest tests/ -v",
+    "test:watch": "python -m pytest-watch tests/",
+    "lint": "python -m flake8 . && python -m black --check .",
+    "lint:fix": "python -m black . && python -m isort .",
+    "install": "pip install -r requirements.txt",
+    "install:dev": "pip install -r requirements-dev.txt"
+  },
+  "description": "AI/ML service for CAD file processing and intelligent search"
+}

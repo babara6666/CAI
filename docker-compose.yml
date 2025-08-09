@@ -1,0 +1,146 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: cad-ai-postgres
+    environment:
+      POSTGRES_DB: cad_ai_platform
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - cad-ai-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: cad-ai-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - cad-ai-network
+
+  # MinIO Object Storage (S3 compatible)
+  minio:
+    image: minio/minio:latest
+    container_name: cad-ai-minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - cad-ai-network
+
+  # Backend API Service
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cad-ai-backend
+    environment:
+      NODE_ENV: development
+      PORT: 3001
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/cad_ai_platform
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: your-jwt-secret-key
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: 9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin123
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+    depends_on:
+      - postgres
+      - redis
+      - minio
+    networks:
+      - cad-ai-network
+
+  # AI/ML Service
+  ai-service:
+    build:
+      context: ./ai-service
+      dockerfile: Dockerfile
+    container_name: cad-ai-service
+    environment:
+      PYTHONPATH: /app
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/cad_ai_platform
+      REDIS_URL: redis://redis:6379
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin123
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./ai-service:/app
+      - ai_models:/app/models
+    depends_on:
+      - postgres
+      - redis
+      - minio
+    networks:
+      - cad-ai-network
+
+  # Frontend Development Server
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: cad-ai-frontend
+    environment:
+      VITE_API_URL: http://localhost:3001
+      VITE_AI_SERVICE_URL: http://localhost:8002
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    networks:
+      - cad-ai-network
+
+  # Nginx Reverse Proxy (for production)
+  nginx:
+    image: nginx:alpine
+    container_name: cad-ai-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/ssl:/etc/nginx/ssl
+    depends_on:
+      - frontend
+      - backend
+      - ai-service
+    networks:
+      - cad-ai-network
+    profiles:
+      - production
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  ai_models:
+
+networks:
+  cad-ai-network:
+    driver: bridge

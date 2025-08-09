@@ -1,0 +1,3 @@
+# Mock large CAD file for testing file size limits
+# This would be a very large file in real testing
+MOCK_LARGE_CAD_FILE_CONTENT
